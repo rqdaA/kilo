@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/param.h>
 #include <sys/types.h>
 #include <termio.h>
 #include <unistd.h>
@@ -28,15 +29,17 @@ enum editorKey {
 
 /*** data ***/
 typedef struct erow {
-  int size;
+  int length;
   char *chars;
 } erow;
 
 struct editorConfig {
   int cx, cy;
+  int rowOff;
+  int colOff;
   int screenRows;
   int screenCols;
-  int numrows;
+  int numRows;
   erow *row;
   struct termios orig_terminos;
 };
@@ -166,14 +169,14 @@ int getCursorPos(int *row, int *col) {
 /*** row operations ***/
 
 void editorAppendRow(char *s, size_t len) {
-  E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
+  E.row = realloc(E.row, sizeof(erow) * (E.numRows + 1));
 
-  int at = E.numrows;
-  E.row[at].size = len;
+  int at = E.numRows;
+  E.row[at].length = len;
   E.row[at].chars = malloc(len + 1);
   memcpy(E.row[at].chars, s, len);
   E.row[at].chars[len] = '\0';
-  E.numrows++;
+  E.numRows++;
 }
 /*** file i/o ***/
 
@@ -214,12 +217,28 @@ void abAppend(struct abuf *ab, const char *s, int len) {
 void abFree(struct abuf *ab) { free(ab->b); }
 
 /*** output ***/
+void editorScroll() {
+  if (E.cy < E.rowOff) {
+    E.rowOff -= E.screenRows;
+  }
+
+  if (E.rowOff + E.screenRows <= E.cy) {
+    E.rowOff += E.screenRows;
+  }
+
+  if (E.cx < E.colOff)
+    E.colOff -= E.screenCols;
+
+  if (E.colOff + E.screenCols <= E.cx)
+    E.colOff += E.screenCols;
+}
+
 void editorDrawRows(struct abuf *ab) {
   int y;
-  char buf[5] = {'\0'};
   for (y = 0; y < E.screenRows; y++) {
-    if (y >= E.numrows) {
-      if (E.numrows == 0 && y == E.screenRows / 3) {
+    int fileRow = y + E.rowOff;
+    if (fileRow >= E.numRows) {
+      if (E.numRows == 0 && y == E.screenRows / 3) {
         char welcome[0x50];
         int welcomeLen = snprintf(welcome, sizeof(welcome),
                                   "Kilo Editor -- version %s", KILO_VERSION);
@@ -231,14 +250,15 @@ void editorDrawRows(struct abuf *ab) {
           abAppend(ab, " ", 1);
         abAppend(ab, welcome, welcomeLen);
       } else {
-        sprintf(buf, "%d", y);
-        abAppend(ab, buf, strlen(buf));
+        abAppend(ab, "~", 1);
       }
     } else {
-      int len = E.row[y].size;
+      int len = E.row[fileRow].length - E.colOff;
+      if (len < 0)
+        len = 0;
       if (len >= E.screenCols)
         len = E.screenCols;
-      abAppend(ab, E.row[y].chars, len);
+      abAppend(ab, &E.row[fileRow].chars[E.colOff], len);
     }
 
     abAppend(ab, "\x1b[K", 3);
@@ -248,6 +268,8 @@ void editorDrawRows(struct abuf *ab) {
 }
 
 void editorRefreshScreen() {
+  editorScroll();
+
   struct abuf ab = ABUF_INIT;
   abAppend(&ab, "\x1b[?25l", 6); // Hide Cursor
   abAppend(&ab, "\x1b[H", 3);    // Set Mouse Pos 1:1
@@ -255,7 +277,8 @@ void editorRefreshScreen() {
   editorDrawRows(&ab);
 
   char buf[0x20];
-  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowOff + 1),
+           (E.cx - E.colOff + 1));
   abAppend(&ab, buf, strlen(buf));
 
   abAppend(&ab, "\x1b[?25h", 6); // Show Cursor
@@ -266,20 +289,26 @@ void editorRefreshScreen() {
 
 /*** input ***/
 void editorMoveCursor(int key) {
+  erow *row = (E.cy > E.numRows - 1) ? NULL : &E.row[E.cy];
   switch (key) {
   case ARROW_LEFT:
     E.cx = E.cx == 0 ? 0 : E.cx - 1;
     break;
   case ARROW_DOWN:
-    E.cy = E.cy == E.screenRows - 1 ? E.cy : E.cy + 1;
+    E.cy = E.cy >= E.numRows - 1 ? E.cy : E.cy + 1;
     break;
   case ARROW_UP:
     E.cy = E.cy == 0 ? 0 : E.cy - 1;
     break;
   case ARROW_RIGHT:
-    E.cx = E.cx == E.screenCols - 1 ? E.cx : E.cx + 1;
+    E.cx = row && row->length - 1 >= E.cx + 1 ? E.cx + 1 : E.cx;
     break;
   }
+
+  row = (E.cy > E.numRows - 1) ? NULL : &E.row[E.cy];
+  int rowLen = row ? row->length - 1 : 0;
+  if (rowLen <= E.cx)
+    E.cx = MAX(row->length - 1, 0);
 }
 void editorProcessKeyPress() {
   int c = editorReadKey();
@@ -330,7 +359,9 @@ int getWindowSize(int *rows, int *cols) {
 void initEditor() {
   E.cx = 0;
   E.cy = 0;
-  E.numrows = 0;
+  E.rowOff = 0;
+  E.colOff = 0;
+  E.numRows = 0;
   E.row = NULL;
 
   if (getWindowSize(&E.screenRows, &E.screenCols) == -1)
