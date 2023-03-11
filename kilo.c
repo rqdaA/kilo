@@ -3,12 +3,16 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <termio.h>
 #include <unistd.h>
 
 /*** defines ***/
 #define CTRL_KEY(k) ((k)&0x1f)
+#define KILO_VERSION "0.0.1"
+#define ABUF_INIT                                                              \
+  { NULL, 0 }
 
 /*** data ***/
 struct editorConfig {
@@ -82,22 +86,62 @@ int getCursorPos(int *row, int *col) {
   return 0;
 }
 
+/*** append buffer ***/
+struct abuf {
+  char *b;
+  int len;
+};
+
+void abAppend(struct abuf *ab, const char *s, int len) {
+  char *new = realloc(ab->b, ab->len + len);
+
+  if (new == NULL)
+    return;
+  memcpy(&new[ab->len], s, len);
+  ab->b = new;
+  ab->len += len;
+}
+
+void abFree(struct abuf *ab) { free(ab->b); }
+
 /*** output ***/
-void editorDrawRows() {
+void editorDrawRows(struct abuf *ab) {
   int y;
-  char buf[] = {'0', '\r', '\n'};
+  char buf[5] = {'\0'};
   for (y = 0; y < E.screenRows; y++) {
-    buf[0] = y + '0';
-    write(STDOUT_FILENO, buf, 3);
+    if (y == E.screenRows / 3) {
+      char welcome[0x50];
+      int welcomeLen = snprintf(welcome, sizeof(welcome),
+                                "Kilo Editor -- version %s", KILO_VERSION);
+      if (welcomeLen > E.screenCols)
+        welcomeLen = E.screenCols;
+
+      int padding = (E.screenCols - welcomeLen) / 2;
+      while (padding--)
+        abAppend(ab, " ", 1);
+      abAppend(ab, welcome, welcomeLen);
+    } else {
+      sprintf(buf, "%d", y);
+      abAppend(ab, buf, strlen(buf));
+    }
+
+    abAppend(ab, "\x1b[K", 3);
+    if (y != E.screenRows - 1)
+      abAppend(ab, "\r\n", 2);
   }
 }
 
 void editorRefreshScreen() {
-  write(STDOUT_FILENO, "\x1b[2J", 4); // Clear Screen
-  write(STDOUT_FILENO, "\x1b[H", 3);  // Set Mouse Pos 1:1
+  struct abuf ab = ABUF_INIT;
+  abAppend(&ab, "\x1b[?25l", 6); // Hide Cursor
+  abAppend(&ab, "\x1b[H", 3);    // Set Mouse Pos 1:1
 
-  editorDrawRows();
-  write(STDOUT_FILENO, "\x1b[H", 3); // Set Mouse Pos 1:1
+  editorDrawRows(&ab);
+  abAppend(&ab, "\x1b[H", 3);    // Set Mouse Pos 1:1
+  abAppend(&ab, "\x1b[?25h", 6); // Show Cursor
+
+  write(STDOUT_FILENO, ab.b, ab.len);
+  abFree(&ab);
 }
 
 /*** input ***/
