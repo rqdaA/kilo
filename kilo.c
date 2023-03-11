@@ -13,9 +13,18 @@
 #define KILO_VERSION "0.0.1"
 #define ABUF_INIT                                                              \
   { NULL, 0 }
+enum editorKey {
+  ARROW_LEFT = 0x100,
+  ARROW_RIGHT,
+  ARROW_UP,
+  ARROW_DOWN,
+  PAGE_UP,
+  PAGE_DOWN
+};
 
 /*** data ***/
 struct editorConfig {
+  int cx, cy;
   int screenRows;
   int screenCols;
   struct termios orig_terminos;
@@ -51,13 +60,36 @@ void enableRawMode() {
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
-char editorReadKey() {
+int editorReadKey() {
   int nread;
   char c;
   while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
     if (nread == -1 && errno != EAGAIN)
       die("READ");
   }
+
+  if (c == '\x1b') {
+    char seq[3];
+    if (read(STDIN_FILENO, &seq[0], 1) != 1)
+      return '\x1b';
+    if (read(STDIN_FILENO, &seq[1], 1) != 1)
+      return '\x1b';
+
+    if (seq[0] == '[') {
+      switch (seq[1]) {
+      case 'A':
+        return ARROW_UP;
+      case 'B':
+        return ARROW_DOWN;
+      case 'C':
+        return ARROW_RIGHT;
+      case 'D':
+        return ARROW_LEFT;
+      }
+    }
+    return '\x1b';
+  }
+
   return c;
 }
 
@@ -137,7 +169,11 @@ void editorRefreshScreen() {
   abAppend(&ab, "\x1b[H", 3);    // Set Mouse Pos 1:1
 
   editorDrawRows(&ab);
-  abAppend(&ab, "\x1b[H", 3);    // Set Mouse Pos 1:1
+
+  char buf[0x20];
+  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+  abAppend(&ab, buf, strlen(buf));
+
   abAppend(&ab, "\x1b[?25h", 6); // Show Cursor
 
   write(STDOUT_FILENO, ab.b, ab.len);
@@ -145,14 +181,36 @@ void editorRefreshScreen() {
 }
 
 /*** input ***/
+void editorMoveCursor(int key) {
+  switch (key) {
+  case ARROW_LEFT:
+    E.cx = E.cx == 0 ? 0 : E.cx - 1;
+    break;
+  case ARROW_DOWN:
+    E.cy = E.cy == E.screenRows - 1 ? E.cy : E.cy + 1;
+    break;
+  case ARROW_UP:
+    E.cy = E.cy == 0 ? 0 : E.cy - 1;
+    break;
+  case ARROW_RIGHT:
+    E.cx = E.cx == E.screenCols - 1 ? E.cx : E.cx + 1;
+    break;
+  }
+}
 void editorProcessKeyPress() {
-  char c = editorReadKey();
+  int c = editorReadKey();
 
   switch (c) {
   case CTRL_KEY('q'):
     write(STDOUT_FILENO, "\x1b[2J", 4);
     write(STDOUT_FILENO, "\x1b[H", 3);
     exit(0);
+    break;
+  case ARROW_RIGHT:
+  case ARROW_LEFT:
+  case ARROW_UP:
+  case ARROW_DOWN:
+    editorMoveCursor(c);
     break;
   }
 }
@@ -174,9 +232,13 @@ int getWindowSize(int *rows, int *cols) {
 
 /*** init ***/
 void initEditor() {
+  E.cx = 0;
+  E.cy = 10;
+
   if (getWindowSize(&E.screenRows, &E.screenCols) == -1)
     die("GET_WINDOWS_SIZE");
 }
+
 int main() {
   enableRawMode();
   initEditor();
